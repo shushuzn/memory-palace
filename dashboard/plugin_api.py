@@ -2,7 +2,6 @@
 
 import json
 import os
-import os.path
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,22 +11,8 @@ from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
-def _get_hermes_home() -> Path:
-    """Resolve Hermes home, compatible with both pip installs and source runs."""
-    if os.environ.get("HERMES_HOME"):
-        return Path(os.environ["HERMES_HOME"])
-    # pip install on Windows → AppData\Local\hermes
-    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    win_homes = [local / "hermes", Path.home() / ".hermes"]
-    for p in win_homes:
-        if (p / "hermes.db").exists() or (p / "state.db").exists():
-            return p
-    return win_homes[1]  # fallback to ~/.hermes
-
-HERMES_HOME = _get_hermes_home()
-DB_PATH = HERMES_HOME / "hermes.db"
-SKILLS_DIR = HERMES_HOME / "skills"
-DB_PATH = HERMES_HOME / "hermes.db"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+DB_PATH = HERMES_HOME / "state.db"
 SKILLS_DIR = HERMES_HOME / "skills"
 
 
@@ -37,6 +22,28 @@ def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _get_tool_usage(conn: sqlite3.Connection) -> dict[str, int]:
+    """Parse tool_calls JSON from messages to build usage counts.
+
+    The state.db schema stores tool names inside a JSON array in the
+    tool_calls column (not in a dedicated tool_name column).
+    """
+    usage: dict[str, int] = {}
+    rows = conn.execute(
+        "SELECT tool_calls FROM messages WHERE tool_calls IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        try:
+            calls = json.loads(row["tool_calls"])
+            for call in calls:
+                name = call.get("function", {}).get("name") or call.get("name")
+                if name:
+                    usage[name] = usage.get(name, 0) + 1
+        except Exception:
+            pass
+    return usage
 
 
 def _get_compounding_multiplier(sessions: list[dict]) -> float:
@@ -55,12 +62,14 @@ def _get_compounding_multiplier(sessions: list[dict]) -> float:
     return round(last_avg_tools / first_avg_tools, 1)
 
 
+# ── Routes ───────────────────────────────────────────────────────────────────
+
+
 @router.get("/stats")
 async def get_stats() -> dict[str, Any]:
     """Return high-level memory palace statistics."""
     conn = _get_db()
     try:
-        # Session stats
         sessions = conn.execute(
             """
             SELECT started_at, tool_call_count, input_tokens, output_tokens,
@@ -69,25 +78,15 @@ async def get_stats() -> dict[str, Any]:
             """
         ).fetchall()
 
-        # Skill stats
+        # Skills from filesystem
         skill_names: list[str] = []
-        skill_last_used: dict[str, float] = {}
-        total_skill_invocations = 0
-
         if SKILLS_DIR.exists():
             for skill_path in SKILLS_DIR.iterdir():
                 if skill_path.is_dir() and not skill_path.name.startswith("_"):
                     skill_names.append(skill_path.name)
 
-        # Tool call counts from messages
-        tool_rows = conn.execute(
-            "SELECT tool_name, COUNT(*) as cnt FROM messages WHERE tool_name IS NOT NULL GROUP BY tool_name"
-        ).fetchall()
-        tool_usage: dict[str, int] = {r["tool_name"]: r["cnt"] for r in tool_rows}
-
-        # Most used tools
+        tool_usage = _get_tool_usage(conn)
         top_tools = sorted(tool_usage.items(), key=lambda x: -x[1])[:5]
-
         sessions_list = [dict(r) for r in sessions]
         multiplier = _get_compounding_multiplier(sessions_list)
 
@@ -110,14 +109,8 @@ async def get_skill_analysis() -> dict[str, Any]:
     """Analyze skill creation and usage patterns."""
     conn = _get_db()
     try:
-        skill_usage: dict[str, int] = {}
-        rows = conn.execute(
-            "SELECT tool_name, COUNT(*) as cnt FROM messages WHERE tool_name IS NOT NULL GROUP BY tool_name"
-        ).fetchall()
-        for r in rows:
-            skill_usage[r["tool_name"]] = r["cnt"]
+        tool_usage = _get_tool_usage(conn)
 
-        # Get skill directory metadata
         skill_data: list[dict[str, Any]] = []
         if SKILLS_DIR.exists():
             for sp in sorted(SKILLS_DIR.iterdir()):
@@ -127,7 +120,7 @@ async def get_skill_analysis() -> dict[str, Any]:
                 created = stat.st_ctime
                 modified = stat.st_mtime
                 size_kb = sum(f.stat().st_size for f in sp.rglob("*") if f.is_file()) / 1024
-                invocations = skill_usage.get(sp.name, 0)
+                invocations = tool_usage.get(sp.name, 0)
                 skill_data.append(
                     {
                         "name": sp.name,
@@ -140,18 +133,9 @@ async def get_skill_analysis() -> dict[str, Any]:
                     }
                 )
 
-        # Dead skills (never invoked)
-        dead_skills = [s for s in skill_data if s["invocations"] == 0]
-        # Latent skills (not used in 30+ days)
         now = datetime.now().timestamp()
-        thirty_days = 30 * 86400
-        # For skills never invoked, treat last modified as proxy
-        latent_skills = [
-            s
-            for s in skill_data
-            if s["invocations"] > 0 and (now - s["modified"]) > thirty_days
-        ]
-        # Most used skills
+        dead_skills = [s for s in skill_data if s["invocations"] == 0]
+        latent_skills = [s for s in skill_data if s["invocations"] > 0 and (now - s["modified"]) > 30 * 86400]
         most_used = sorted(skill_data, key=lambda s: -s["invocations"])[:10]
 
         return {
@@ -186,7 +170,6 @@ async def get_timeline() -> dict[str, Any]:
         if not sessions:
             return {"milestones": [], "events": []}
 
-        # Build monthly aggregates
         by_month: dict[str, dict[str, Any]] = {}
         for s in sessions:
             dt = datetime.fromtimestamp(s["started_at"], tz=timezone.utc)
@@ -223,9 +206,7 @@ async def get_timeline() -> dict[str, Any]:
                 }
             )
 
-        # Notable events
         events = []
-        # Skill creation events (by mtime jumps in skills dir)
         if SKILLS_DIR.exists():
             skill_times: list[tuple[str, float]] = []
             for sp in SKILLS_DIR.iterdir():
@@ -245,7 +226,6 @@ async def get_timeline() -> dict[str, Any]:
                         }
                     )
 
-        # High-activity sessions
         high_tool = sorted(sessions, key=lambda s: -(s.get("tool_call_count") or 0))[:3]
         for s in high_tool:
             dt = datetime.fromtimestamp(s["started_at"], tz=timezone.utc)
@@ -264,27 +244,67 @@ async def get_timeline() -> dict[str, Any]:
         conn.close()
 
 
+@router.get("/sessions")
+async def get_sessions(
+    month: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return session list, optionally filtered by YYYY-MM month."""
+    conn = _get_db()
+    try:
+        where = ""
+        params: list[Any] = []
+        if month:
+            where = "WHERE strftime('%Y-%m', started_at, 'unixepoch') = ?"
+            params.append(month)
+
+        rows = conn.execute(
+            f"""
+            SELECT id, started_at, ended_at, tool_call_count, input_tokens,
+                   output_tokens, estimated_cost_usd, title, end_reason,
+                   message_count, model
+            FROM sessions
+            {where}
+            ORDER BY started_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM sessions {where}", params
+        ).fetchone()[0]
+
+        return {
+            "sessions": [dict(r) for r in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    finally:
+        conn.close()
 @router.get("/constellation")
 async def get_constellation() -> dict[str, Any]:
     """Build skill relationship constellation for visualization."""
     conn = _get_db()
     try:
-        # Get tool co-occurrence (skills used together in same session)
+        # Collect tool names per session from tool_calls JSON
         session_tools: dict[str, list[str]] = {}
         rows = conn.execute(
-            """
-            SELECT session_id, tool_name FROM messages
-            WHERE tool_name IS NOT NULL
-            ORDER BY session_id, timestamp
-            """
+            "SELECT session_id, tool_calls FROM messages WHERE tool_calls IS NOT NULL"
         ).fetchall()
         for r in rows:
-            sid = r["session_id"]
-            tname = r["tool_name"]
+            sid = str(r["session_id"])
             if sid not in session_tools:
                 session_tools[sid] = []
-            if tname not in session_tools[sid]:
-                session_tools[sid].append(tname)
+            try:
+                for call in json.loads(r["tool_calls"]):
+                    name = call.get("function", {}).get("name") or call.get("name")
+                    if name and name not in session_tools[sid]:
+                        session_tools[sid].append(name)
+            except Exception:
+                pass
 
         # Build edges (co-occurrence count)
         co_occur: dict[tuple[str, str], int] = {}
@@ -295,19 +315,10 @@ async def get_constellation() -> dict[str, Any]:
                     co_occur[key] = co_occur.get(key, 0) + 1
 
         # Get usage counts
-        usage_counts: dict[str, int] = {}
-        rows = conn.execute(
-            "SELECT tool_name, COUNT(*) as cnt FROM messages WHERE tool_name IS NOT NULL GROUP BY tool_name"
-        ).fetchall()
-        for r in rows:
-            usage_counts[r["tool_name"]] = r["cnt"]
+        usage_counts = _get_tool_usage(conn)
 
         nodes = [
-            {
-                "id": name,
-                "val": max(cnt, 1),
-                "count": cnt,
-            }
+            {"id": name, "val": max(cnt, 1), "count": cnt}
             for name, cnt in sorted(usage_counts.items(), key=lambda x: -x[1])[:30]
         ]
 
@@ -322,7 +333,7 @@ async def get_constellation() -> dict[str, Any]:
         conn.close()
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _sessions_by_day(sessions: list[dict]) -> list[dict]:

@@ -13,6 +13,10 @@
   var cn = SDK.utils.cn;
   var timeAgo = SDK.utils.timeAgo;
 
+  // Deterministic seeded RNG (LCG) — constellation layout is stable across renders
+  function createRng(seed) { var s = seed; return function rng() { s = (s * 9301 + 49297) % 233280; return s / 233280; }; }
+  function hashCode(str) { var h = 0; for (var i = 0; i < str.length; i++) { h = ((h << 5) - h) + str.charCodeAt(i); h |= 0; } return Math.abs(h); }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   function pct(a, b) {
@@ -46,10 +50,11 @@
   function Constellation(_ref2) {
     var nodes = _ref2.nodes, edges = _ref2.edges;
     var svgW = 500, svgH = 300;
+    var rng = createRng(hashCode(nodes.map(function (n) { return n.id; }).join(",")));
     var nodeMap = {};
     nodes.forEach(function (n) {
-      var angle = Math.random() * 2 * Math.PI;
-      var r = 80 + Math.random() * 80;
+      var angle = rng() * 2 * Math.PI;
+      var r = 80 + rng() * 80;
       nodeMap[n.id] = { x: svgW / 2 + r * Math.cos(angle), y: svgH / 2 + r * Math.sin(angle), vx: 0, vy: 0 };
     });
 
@@ -169,6 +174,177 @@
     );
   }
 
+  // ── Timeline Tab ───────────────────────────────────────────────────────
+
+  function TimelineTab(_ref5) {
+    var timeline = _ref5.timeline;
+    var milestones = timeline.milestones || [];
+    var events = timeline.events || [];
+
+    var _useState2 = useState({}),
+      expandedMonths = _useState2[0],
+      setExpandedMonths = _useState2[1];
+    var _useState3 = useState({}),
+      sessionData = _useState3[0],
+      setSessionData = _useState3[1];
+    var _useState4 = useState({}),
+      sessionLoading = _useState4[0],
+      setSessionLoading = _useState4[1];
+
+    if (milestones.length === 0) {
+      return React.createElement(Card, null,
+        React.createElement(CardContent, { style: { padding: 32, textAlign: "center" } },
+          React.createElement("p", { className: "text-sm text-muted-foreground" }, "No timeline data yet. Sessions will appear here as you work.")
+        )
+      );
+    }
+
+    // Build event lookup: month → events
+    var eventsByMonth = {};
+    events.forEach(function (e) {
+      if (!eventsByMonth[e.month]) eventsByMonth[e.month] = [];
+      eventsByMonth[e.month].push(e);
+    });
+
+    var iconMap = { Sparkles: "✨", Zap: "⚡", default: "📌" };
+    var getIcon = function (icon) { return iconMap[icon] || iconMap.default; };
+
+    function toggleMonth(month) {
+      var isExpanded = expandedMonths[month];
+      setExpandedMonths(function (prev) {
+        var next = Object.assign({}, prev);
+        next[month] = !isExpanded;
+        return next;
+      });
+      if (!isExpanded && !sessionData[month]) {
+        setSessionLoading(function (prev) { return Object.assign({}, prev, { [month]: true }); });
+        SDK.fetchJSON("/api/plugins/memory-palace/sessions?month=" + month)
+          .then(function (res) {
+            setSessionData(function (prev) { return Object.assign({}, prev, { [month]: res.sessions }); });
+            setSessionLoading(function (prev) { return Object.assign({}, prev, { [month]: false }); });
+          })
+          .catch(function () {
+            setSessionLoading(function (prev) { return Object.assign({}, prev, { [month]: false }); });
+          });
+      }
+    }
+
+    function fmtDuration(started_at, ended_at) {
+      if (!ended_at || !started_at) return "—";
+      var mins = Math.round((ended_at - started_at) / 60);
+      if (mins < 60) return mins + "m";
+      return Math.round(mins / 60) + "h " + (mins % 60) + "m";
+    }
+
+    var totalCost = milestones.reduce(function (s, m) { return s + (m.cost_usd || 0); }, 0);
+    var totalTools = milestones.reduce(function (s, m) { return s + m.tools; }, 0);
+    var totalTokens = milestones.reduce(function (s, m) { return s + m.tokens; }, 0);
+    var totalSessions = milestones.reduce(function (s, m) { return s + m.sessions; }, 0);
+    var maxSessions = Math.max.apply(Math, milestones.map(function (x) { return x.sessions; })) || 1;
+
+    return React.createElement("div", null,
+
+      // Summary bar
+      React.createElement(Card, { style: { marginBottom: 16, background: "linear-gradient(135deg, #0d1f1a 0%, #1a2e24 100%)" } },
+        React.createElement(CardContent, { style: { padding: 16 } },
+          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, textAlign: "center" } },
+            [
+              { label: "Months Active", value: milestones.length, icon: "📅" },
+              { label: "Total Sessions", value: totalSessions, icon: "💬" },
+              { label: "Tool Calls", value: totalTools, icon: "🔧" },
+              { label: "Total Cost", value: fmtCost(totalCost), icon: "💰" },
+            ].map(function (s) {
+              return React.createElement("div", { key: s.label },
+                React.createElement("div", { style: { fontSize: 18 } }, s.icon),
+                React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "#4dd0e1" } }, s.value),
+                React.createElement("div", { className: "text-xs text-muted-foreground" }, s.label)
+              );
+            })
+          )
+        )
+      ),
+
+      // Month list
+      milestones.slice().reverse().map(function (m) {
+        var monthEvents = eventsByMonth[m.month] || [];
+        var isExpanded = expandedMonths[m.month];
+        var isTopMonth = m.sessions === maxSessions;
+        var sessions = sessionData[m.month] || [];
+        var isLoading = sessionLoading[m.month];
+
+        return React.createElement("div", { key: m.month, style: { position: "relative", marginBottom: 0 } },
+
+          // Connector line
+          React.createElement("div", { style: { position: "absolute", left: 19, top: 36, bottom: 0, width: 1, background: "var(--color-border)" } }),
+
+          // Month header row (clickable to expand)
+          React.createElement(Card, {
+            style: {
+              marginBottom: 6,
+              borderLeft: isTopMonth ? "3px solid #4dd0e1" : "3px solid var(--color-border)",
+              cursor: "pointer",
+            },
+            onClick: function () { return toggleMonth(m.month); }
+          },
+            React.createElement(CardContent, { style: { padding: "12px 16px" } },
+              React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+                React.createElement("div", { style: { width: 40, height: 40, borderRadius: "50%", background: isTopMonth ? "#4dd0e1/20" : "var(--color-border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0, fontWeight: 600, color: isTopMonth ? "#4dd0e1" : "var(--color-muted-foreground)" } },
+                  m.month.slice(5) || m.month
+                ),
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                  React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, m.month, isTopMonth && React.createElement("span", { style: { fontSize: 10, marginLeft: 6, color: "#4dd0e1" } }, "★ peak")),
+                  React.createElement("div", { style: { fontSize: 11, color: "#888", marginTop: 2 } },
+                    m.sessions + " sessions · " + m.tools + " tools · " + m.tokens.toLocaleString() + " tokens"
+                  )
+                ),
+                React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0, alignItems: "center" } },
+                  React.createElement(Badge, { style: { background: "#6366f1/20", color: "#6366f1", fontSize: 10 } }, m.sessions + " sessions"),
+                  m.cost_usd > 0 && React.createElement(Badge, { style: { background: "#4dd0e1/20", color: "#4dd0e1", fontSize: 10 } }, fmtCost(m.cost_usd)),
+                  React.createElement("span", { style: { fontSize: 12, color: "#666", marginLeft: 4 } }, isExpanded ? "▲" : "▼")
+                )
+              )
+            )
+          ),
+
+          // Expanded: events + sessions
+          isExpanded && React.createElement("div", { style: { marginLeft: 48, marginBottom: 8 } },
+
+            // Events
+            monthEvents.length > 0 && React.createElement("div", { style: { marginBottom: 8 } },
+              monthEvents.map(function (e, i) {
+                return React.createElement("div", { key: i, style: { display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", background: "var(--color-card)", borderRadius: 6, marginBottom: 4, border: "1px solid var(--color-border)" } },
+                  React.createElement("span", { style: { fontSize: 14 } }, getIcon(e.icon)),
+                  React.createElement("span", { style: { fontSize: 12, color: "var(--color-muted-foreground)" } }, e.description)
+                );
+              })
+            ),
+
+            // Session rows
+            isLoading
+              ? React.createElement("div", { style: { padding: "8px 12px", fontSize: 12, color: "#888" } }, "Loading sessions…")
+              : sessions.length > 0
+                ? React.createElement("div", null,
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 600, color: "#888", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" } }, "Sessions"),
+                    sessions.map(function (s, i) {
+                      return React.createElement("div", { key: s.id || i, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: "var(--color-card)", borderRadius: 6, marginBottom: 3, border: "1px solid var(--color-border)", fontSize: 12 } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                          React.createElement("div", { style: { fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, s.title || "Untitled"),
+                          React.createElement("div", { style: { color: "#666", fontSize: 11 } },
+                            (s.model || "—") + " · " + (s.message_count || 0) + " msgs · " + fmtDuration(s.started_at, s.ended_at)
+                          )
+                        ),
+                        React.createElement(Badge, { style: { background: "#4dd0e1/15", color: "#4dd0e1", fontSize: 10 } }, (s.tool_call_count || 0) + " tools"),
+                        s.estimated_cost_usd > 0 && React.createElement(Badge, { style: { background: "#6366f1/15", color: "#6366f1", fontSize: 10 } }, fmtCost(s.estimated_cost_usd))
+                      );
+                    })
+                  )
+                : null
+          )
+        );
+      })
+    );
+  }
+
   // ── Main Page ─────────────────────────────────────────────────────────────
 
   function MemoryPalace() {
@@ -219,6 +395,7 @@
     var tabs = [
       { id: "overview", label: "Overview" },
       { id: "skills", label: "Skills" },
+      { id: "timeline", label: "Timeline" },
       { id: "constellation", label: "Constellation" },
     ];
 
@@ -305,6 +482,9 @@
             React.createElement(TimelineChart, { milestones: timeline.milestones || [] })
           )
         ),
+
+        // Chronicle of the Palace
+        React.createElement(ChronicleMode, null),
 
         // Tool call trend
         (stats.tool_call_trend || []).length > 0 && React.createElement(Card, { style: { marginBottom: 16 } },
@@ -404,6 +584,9 @@
         )
       ),
 
+      // ── Timeline Tab ──────────────────────────────────────────────────────
+      data.activeTab === "timeline" && React.createElement(TimelineTab, { timeline: timeline }),
+
       // ── Constellation Tab ──────────────────────────────────────────────
       data.activeTab === "constellation" && React.createElement("div", null,
         React.createElement(Card, { style: { marginBottom: 16 } },
@@ -434,6 +617,235 @@
               )
             )
           )
+        )
+      )
+    );
+  }
+
+  // ── ChronicleMode: Ancient Scroll Chapters ─────────────────────────
+
+  function ChronicleMode() {
+    var _useState2 = useState({ loading: true, data: null, error: null, expanded: false });
+    var state = _useState2[0], setState = _useState2[1];
+
+    useEffect(function () {
+      SDK.fetchJSON("/api/plugins/memory-palace/chronicle?limit=15")
+        .then(function (d) { return setState({ loading: false, data: d, error: null }); })
+        .catch(function (e) { return setState({ loading: false, data: null, error: String(e) }); });
+    }, []);
+
+    if (state.loading) {
+      return React.createElement(Card, { style: { marginBottom: 16, border: "1px solid rgba(217, 170, 110, 0.25)", background: "linear-gradient(180deg, rgba(40, 30, 15, 0.6) 0%, rgba(25, 18, 8, 0.95) 100%)" } },
+        React.createElement(CardContent, { style: { padding: 24, textAlign: "center" } },
+          React.createElement("div", { style: { fontSize: 24, marginBottom: 8 } }, "📜"),
+          React.createElement("div", { style: { color: "#d9a96e", fontSize: 12, fontStyle: "italic" } }, "Unrolling the ancient scrolls...")
+        )
+      );
+    }
+
+    if (state.error) {
+      return React.createElement(Card, { style: { marginBottom: 16 } },
+        React.createElement(CardContent, { style: { padding: 16, textAlign: "center", color: "rgba(255,255,255,0.4)" } },
+          "Chronicles lost to time: " + state.error
+        )
+      );
+    }
+
+    var data = state.data || {};
+    var chronicles = data.chronicles || [];
+
+    if (chronicles.length === 0) {
+      return React.createElement(Card, { style: { marginBottom: 16, border: "1px solid rgba(217, 170, 110, 0.25)" } },
+        React.createElement(CardContent, { style: { padding: 24, textAlign: "center" } },
+          React.createElement("div", { style: { fontSize: 20, marginBottom: 8 } }, "📜"),
+          React.createElement("div", { style: { color: "rgba(255,255,255,0.4)", fontStyle: "italic" } }, "No chapters written yet")
+        )
+      );
+    }
+
+    var sepia = "#d4a574";
+    var sepiaLight = "#e8c9a0";
+    var typeColors = {
+      quiet_contemplation: "rgba(100, 120, 140, 0.6)",
+      brief_encounter: "rgba(120, 160, 120, 0.6)",
+      journey: "rgba(180, 160, 100, 0.6)",
+      epic: "rgba(180, 130, 60, 0.6)",
+      legendary: "rgba(200, 160, 50, 0.7)",
+    };
+
+    var firstChapter = chronicles[0] || null;
+    var restChapters = chronicles.slice(1);
+
+    return React.createElement(Card, {
+      style: {
+        marginBottom: 16,
+        border: "1px solid rgba(217, 170, 110, 0.3)",
+        background: "linear-gradient(180deg, rgba(45, 32, 15, 0.7) 0%, rgba(30, 20, 8, 0.95) 100%)",
+        boxShadow: "inset 0 0 60px rgba(139, 105, 20, 0.1), 0 4px 20px rgba(0,0,0,0.4)",
+      }
+    },
+      React.createElement("div", { style: { padding: "12px 16px 8px", borderBottom: "1px solid rgba(217, 170, 110, 0.15)" } },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+            React.createElement("span", { style: { fontSize: 20 } }, "📜"),
+            React.createElement("div", null,
+              React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: "0.15em", color: sepiaLight, textTransform: "uppercase" } }, "Chronicle of the Palace"),
+              React.createElement("div", { style: { fontSize: 10, color: "rgba(217, 170, 110, 0.6)" } },
+                (data.era_start || "?") + " \u2192 " + (data.era_end || "?") + " \u2022 " + (data.total_chapters || chronicles.length) + " chapters"
+              )
+            )
+          ),
+          restChapters.length > 0 && React.createElement("button", {
+            onClick: function () { return setState(function (s) { return Object.assign({}, s, { expanded: !s.expanded }); }); },
+            style: {
+              padding: "4px 10px",
+              background: "rgba(217, 170, 110, 0.1)",
+              border: "1px solid rgba(217, 170, 110, 0.25)",
+              borderRadius: 6,
+              color: sepiaLight,
+              fontSize: 10,
+              cursor: "pointer",
+            }
+          }, state.expanded ? "\u25B2 Hide" : "\u25BC " + restChapters.length + " more")
+        )
+      ),
+      React.createElement(CardContent, { style: { padding: "8px 16px 16px" } },
+        React.createElement("div", { style: { textAlign: "center", marginBottom: 12, color: sepia, opacity: 0.5, fontSize: 10, letterSpacing: "0.3em" } },
+          "\u2736 \u2736 \u2736"
+        ),
+        firstChapter && React.createElement("div", {
+          style: {
+            position: "relative",
+            padding: "10px 12px",
+            marginBottom: 0,
+            background: "linear-gradient(135deg, rgba(217, 170, 110, 0.12) 0%, rgba(217, 170, 110, 0.04) 100%)",
+            borderRadius: 6,
+            border: "1px solid rgba(217, 170, 110, 0.3)",
+            boxShadow: "0 2px 12px rgba(217, 170, 110, 0.15)",
+          }
+        },
+          React.createElement("div", {
+            style: {
+              position: "absolute",
+              left: -8,
+              top: "50%",
+              transform: "translateY(-50%)",
+              width: 28,
+              height: 28,
+              borderRadius: "50%",
+              background: "linear-gradient(135deg, #8b6914 0%, #5a4510 100%)",
+              border: "2px solid " + sepia,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 9,
+              fontWeight: 700,
+              color: sepiaLight,
+              boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+            }
+          }, firstChapter.chapter),
+          React.createElement("div", { style: { paddingLeft: 24 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 } },
+              React.createElement("div", { style: { flex: 1 } },
+                React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: sepiaLight, lineHeight: 1.3, marginBottom: 2 } }, firstChapter.title),
+                React.createElement("div", { style: { fontSize: 10, color: "rgba(217, 170, 110, 0.5)", fontStyle: "italic" } },
+                  (firstChapter.date_display || "") + " \u2022 " + (firstChapter.epithet || "")
+                )
+              ),
+              React.createElement("div", {
+                style: {
+                  padding: "2px 8px",
+                  background: typeColors[firstChapter.chapter_type] || typeColors.journey,
+                  borderRadius: 10,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: "rgba(255,255,255,0.9)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  whiteSpace: "nowrap",
+                }
+              }, firstChapter.chapter_type === "legendary" ? "\uD83C\uDFC6 " + firstChapter.chapter_type : firstChapter.chapter_type)
+            ),
+            React.createElement("div", {
+              style: { display: "flex", gap: 12, marginTop: 6, fontSize: 10, color: "rgba(217, 170, 110, 0.55)" }
+            },
+              React.createElement("span", null, "\u2694\uFE0F " + (firstChapter.tool_calls || 0) + " tools"),
+              React.createElement("span", null, "\u23F1 " + (firstChapter.duration_mins || 0) + "m"),
+              firstChapter.tokens > 0 && React.createElement("span", null, "\uD83D\uDCDD " + fmtNum(firstChapter.tokens) + " tokens"),
+              React.createElement("span", { style: { fontStyle: "italic" } }, firstChapter.model || "")
+            )
+          )
+        ),
+        !state.expanded && restChapters.length > 0 && React.createElement("div", {
+          style: { textAlign: "center", padding: "8px", color: "rgba(217, 170, 110, 0.4)", fontSize: 10, fontStyle: "italic" }
+        }, "... " + restChapters.length + " earlier chapters"),
+        state.expanded && restChapters.map(function (c) {
+          return React.createElement("div", {
+            key: c.chapter,
+            style: {
+              position: "relative",
+              padding: "10px 12px",
+              marginTop: 8,
+              background: "rgba(30, 20, 8, 0.4)",
+              borderRadius: 6,
+              border: "1px solid rgba(217, 170, 110, 0.1)",
+            }
+          },
+            React.createElement("div", {
+              style: {
+                position: "absolute",
+                left: -8,
+                top: "50%",
+                transform: "translateY(-50%)",
+                width: 28,
+                height: 28,
+                borderRadius: "50%",
+                background: "linear-gradient(135deg, #8b6914 0%, #5a4510 100%)",
+                border: "2px solid " + sepia,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 9,
+                fontWeight: 700,
+                color: sepiaLight,
+                boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+              }
+            }, c.chapter),
+            React.createElement("div", { style: { paddingLeft: 24 } },
+              React.createElement("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 } },
+                React.createElement("div", { style: { flex: 1 } },
+                  React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: "rgba(232, 201, 160, 0.85)", lineHeight: 1.3, marginBottom: 2 } }, c.title),
+                  React.createElement("div", { style: { fontSize: 10, color: "rgba(217, 170, 110, 0.5)", fontStyle: "italic" } },
+                    (c.date_display || "") + " \u2022 " + (c.epithet || "")
+                  )
+                ),
+                React.createElement("div", {
+                  style: {
+                    padding: "2px 8px",
+                    background: typeColors[c.chapter_type] || typeColors.journey,
+                    borderRadius: 10,
+                    fontSize: 9,
+                    fontWeight: 600,
+                    color: "rgba(255,255,255,0.9)",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                    whiteSpace: "nowrap",
+                  }
+                }, c.chapter_type === "legendary" ? "\uD83C\uDFC6 " + c.chapter_type : c.chapter_type)
+              ),
+              React.createElement("div", {
+                style: { display: "flex", gap: 12, marginTop: 6, fontSize: 10, color: "rgba(217, 170, 110, 0.55)" }
+              },
+                React.createElement("span", null, "\u2694\uFE0F " + (c.tool_calls || 0) + " tools"),
+                React.createElement("span", null, "\u23F1 " + (c.duration_mins || 0) + "m"),
+                c.tokens > 0 && React.createElement("span", null, "\uD83D\uDCDD " + fmtNum(c.tokens) + " tokens"),
+                React.createElement("span", { style: { fontStyle: "italic" } }, c.model || "")
+              )
+            )
+          );
+        }),
+        React.createElement("div", { style: { textAlign: "center", marginTop: 12, color: sepia, opacity: 0.4, fontSize: 10 } },
+          "\u2736 \uD83D\uDCDC \u2736"
         )
       )
     );

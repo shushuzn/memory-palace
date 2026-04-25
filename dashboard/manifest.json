@@ -9,5 +9,5 @@
     "position": "before:skills"
   },
   "entry": "dist/index.js",
-  "api": "plugin_api.py"
+  "api": "../plugin_api.py"
 }
