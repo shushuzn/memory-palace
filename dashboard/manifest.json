@@ -1,0 +1,12 @@
+{
+  "name": "memory-palace",
+  "label": "Memory Palace",
+  "description": "Visualize your agent compounding intelligence over time.",
+  "icon": "Building2",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/memory-palace",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js"
+}
