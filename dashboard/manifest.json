@@ -6,7 +6,7 @@
   "version": "1.0.0",
   "tab": {
     "path": "/memory-palace",
-    "position": "after:skills"
+    "position": "before:skills"
   },
   "entry": "dist/index.js"
 }
