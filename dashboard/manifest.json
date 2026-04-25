@@ -8,5 +8,6 @@
     "path": "/memory-palace",
     "position": "before:skills"
   },
-  "entry": "dist/index.js"
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
 }
