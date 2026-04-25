@@ -12,7 +12,21 @@ from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+def _get_hermes_home() -> Path:
+    """Resolve Hermes home, compatible with both pip installs and source runs."""
+    if os.environ.get("HERMES_HOME"):
+        return Path(os.environ["HERMES_HOME"])
+    # pip install on Windows → AppData\Local\hermes
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    win_homes = [local / "hermes", Path.home() / ".hermes"]
+    for p in win_homes:
+        if (p / "hermes.db").exists() or (p / "state.db").exists():
+            return p
+    return win_homes[1]  # fallback to ~/.hermes
+
+HERMES_HOME = _get_hermes_home()
+DB_PATH = HERMES_HOME / "hermes.db"
+SKILLS_DIR = HERMES_HOME / "skills"
 DB_PATH = HERMES_HOME / "hermes.db"
 SKILLS_DIR = HERMES_HOME / "skills"
 
