@@ -668,7 +668,7 @@
   // ── Main Page ─────────────────────────────────────────────────────────────
 
   function MemoryPalace() {
-    var _useState = useState({ loading: true, stats: null, skills: null, timeline: null, constellation: null, palaceOverlay: null, echoMap: null, error: null, activeTab: "overview" }),
+    var _useState = useState({ loading: true, stats: null, skills: null, timeline: null, constellation: null, palaceOverlay: null, echoMap: null, awakening: null, error: null, activeTab: "overview" }),
       data = _useState[0], setData = _useState[1];
 
     useEffect(function () {
@@ -679,13 +679,14 @@
         SDK.fetchJSON("/api/plugins/memory-palace/constellation"),
         SDK.fetchJSON("/api/plugins/memory-palace/palace-overlay"),
         SDK.fetchJSON("/api/plugins/memory-palace/echo-map"),
+        SDK.fetchJSON("/api/plugins/memory-palace/awakening"),
       ])
         .then(function (_ref5) {
-          var stats = _ref5[0], skills = _ref5[1], timeline = _ref5[2], constellation = _ref5[3], palaceOverlay = _ref5[4], echoMap = _ref5[5];
-          setData({ loading: false, stats: stats, skills: skills, timeline: timeline, constellation: constellation, palaceOverlay: palaceOverlay, echoMap: echoMap, activeTab: "overview", error: null });
+          var stats = _ref5[0], skills = _ref5[1], timeline = _ref5[2], constellation = _ref5[3], palaceOverlay = _ref5[4], echoMap = _ref5[5], awakening = _ref5[6];
+          setData({ loading: false, stats: stats, skills: skills, timeline: timeline, constellation: constellation, palaceOverlay: palaceOverlay, echoMap: echoMap, awakening: awakening, activeTab: "overview", error: null });
         })
         .catch(function (err) {
-          setData({ loading: false, stats: null, skills: null, timeline: null, constellation: null, palaceOverlay: null, echoMap: null, activeTab: "overview", error: String(err) || "Failed to load data" });
+          setData({ loading: false, stats: null, skills: null, timeline: null, constellation: null, palaceOverlay: null, echoMap: null, awakening: null, activeTab: "overview", error: String(err) || "Failed to load data" });
         });
     }, []);
 
@@ -715,6 +716,7 @@
     var constellation = data.constellation || {};
     var palaceOverlay = data.palaceOverlay || {};
     var echoMap = data.echoMap || {};
+    var awakening = data.awakening || {};
 
     var tabs = [
       { id: "overview", label: "Overview" },
@@ -723,6 +725,7 @@
       { id: "constellation", label: "Constellation" },
       { id: "echo", label: "🌊 Echo" },
       { id: "palace", label: "🏛️ Palace" },
+      { id: "awakening", label: "⚡ Awakening" },
     ];
 
     return React.createElement("div", { style: { padding: "0 0 32px" } },
@@ -1025,6 +1028,100 @@
               React.createElement("div", null,
                 React.createElement("div", { className: "text-sm text-muted-foreground", style: { marginBottom: 8 } }, "Connections"),
                 React.createElement("div", { style: { fontSize: 24, fontWeight: 700, color: "#6366f1" } }, (constellation.edges || []).length)
+              )
+            )
+          )
+        )
+      ),
+
+      // ── Awakening Tab ──────────────────────────────────────────────
+      data.activeTab === "awakening" && React.createElement("div", null,
+
+        !data.awakening ? React.createElement(Card, null,
+          React.createElement(CardContent, { style: { padding: 32, textAlign: "center" } },
+            React.createElement("div", { style: { fontSize: 32, marginBottom: 8 } }, "⚡"),
+            React.createElement("p", { className: "text-sm text-muted-foreground" }, "Detecting your agent's awakening moment...")
+          )
+        ) :
+
+        data.awakening.awakening_found === false ? React.createElement(Card, null,
+          React.createElement(CardContent, { style: { padding: 32, textAlign: "center" } },
+            React.createElement("div", { style: { fontSize: 32, marginBottom: 8 } }, "🌱"),
+            React.createElement("p", { className: "text-sm text-muted-foreground" }, data.awakening.message || "Your agent is still finding its footing.")
+          )
+        ) :
+
+        React.createElement("div", null,
+          // Hero card
+          React.createElement(Card, { style: { marginBottom: 16, background: "linear-gradient(135deg, #1a0a2e 0%, #2d1b4e 100%)", border: "1px solid rgba(139, 92, 246, 0.4)" } },
+            React.createElement(CardContent, { style: { padding: 24 } },
+              React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 16, marginBottom: 16 } },
+                React.createElement("div", { style: { fontSize: 48 } }, "⚡"),
+                React.createElement("div", null,
+                  React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "#a78bfa", lineHeight: 1 } },
+                    data.awakening.pivot_session ? data.awakening.pivot_session.started_at ? new Date(data.awakening.pivot_session.started_at).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }) : "—" : "—"
+                  ),
+                  React.createElement("p", { className: "text-xs", style: { color: "rgba(167,139,250,0.7)", marginTop: 4 } },
+                    "The moment everything changed — " + (data.awakening.max_acceleration || 0).toFixed(1) + "× acceleration detected"
+                  )
+                )
+              ),
+              React.createElement(Separator, { style: { margin: "12px 0", borderColor: "rgba(139,92,246,0.2)" } }),
+              React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 } },
+                [
+                  { label: "Before avg", value: Math.round(data.awakening.avg_before || 0), unit: "tools/session" },
+                  { label: "After avg", value: Math.round(data.awakening.avg_after || 0), unit: "tools/session" },
+                  { label: "Sessions before", value: (data.awakening.before || []).length, unit: "sessions" },
+                ].map(function (s) {
+                  return React.createElement("div", { key: s.label, style: { textAlign: "center" } },
+                    React.createElement("div", { style: { fontSize: 24, fontWeight: 700, color: "#a78bfa" } }, s.value),
+                    React.createElement("div", { className: "text-xs text-muted-foreground" }, s.unit),
+                    React.createElement("div", { className: "text-xs", style: { color: "rgba(167,139,250,0.6)" } }, s.label)
+                  );
+                })
+              )
+            )
+          ),
+
+          // Before / After sessions
+          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 } },
+            [
+              { label: "Before Awakening", cls: data.awakening.before || [], color: "#64748b", icon: "◀", desc: "Dormant phase" },
+              { label: "After Awakening", cls: data.awakening.after || [], color: "#a78bfa", icon: "▶", desc: "Explosive phase" },
+            ].map(function (phase) {
+              return React.createElement(Card, { key: phase.label },
+                React.createElement(CardHeader, null,
+                  React.createElement(CardTitle, null, React.createElement("span", { style: { color: phase.color } }, phase.icon + " " + phase.label)),
+                  React.createElement("p", { className: "text-xs text-muted-foreground", style: { marginTop: 2 } }, phase.desc)
+                ),
+                React.createElement(CardContent, null,
+                  (phase.cls || []).length === 0 ? React.createElement("p", { className: "text-sm text-muted-foreground" }, "No sessions") :
+                  phase.cls.slice(0, 8).map(function (s) {
+                    return React.createElement("div", { key: s.id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" } },
+                      React.createElement("span", { className: "text-xs", style: { color: "rgba(255,255,255,0.5)" } },
+                        s.started_at ? new Date(s.started_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—"
+                      ),
+                      React.createElement("span", { className: "text-xs", style: { color: phase.color, fontWeight: 600 } },
+                        (s.tool_call_count || 0) + " tools"
+                      )
+                    );
+                  })
+                )
+              )
+            })
+          ),
+
+          // Top tools at awakening
+          (data.awakening.top_tools_at_awakening || []).length > 0 && React.createElement(Card, null,
+            React.createElement(CardHeader, null,
+              React.createElement(CardTitle, null, "🔥 Tools Born at Awakening"),
+              React.createElement("p", { className: "text-xs text-muted-foreground", style: { marginTop: 2 } }, "The tools that defined this pivotal moment")
+            ),
+            React.createElement(CardContent, null,
+              React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8 } },
+                (data.awakening.top_tools_at_awakening || []).map(function (t) {
+                  return React.createElement("span", { key: t, style: { padding: "4px 10px", background: "rgba(139,92,246,0.15)", border: "1px solid rgba(139,92,246,0.3)", borderRadius: 12, fontSize: 12, color: "#a78bfa" } }, t);
+                })
               )
             )
           )
