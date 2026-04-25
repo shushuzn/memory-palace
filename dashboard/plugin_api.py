@@ -62,6 +62,132 @@ def _get_compounding_multiplier(sessions: list[dict]) -> float:
     return round(last_avg_tools / first_avg_tools, 1)
 
 
+# ── Time-Folding Palace Overlay ──────────────────────────────────────────────
+
+
+@router.get("/palace-overlay")
+async def get_palace_overlay() -> dict[str, Any]:
+    """Return three palace snapshots overlaid: 30d, 7d, now.
+
+    Each tool node carries:
+    - count: current total invocations
+    - brightness: normalised 0-1 opacity for rendering
+    - trend: 'new' | 'growing' | 'fading' | 'stable'
+    - layers: raw counts for each time window
+    """
+    import traceback
+    try:
+        conn = _get_db()
+    except Exception as e:
+        traceback.print_exc()
+        raise
+    try:
+        now_ts = datetime.now().timestamp()
+
+        def _tool_snapshot(
+            start_ts: float, end_ts: float
+        ) -> dict[str, int]:
+            rows = conn.execute(
+                """
+                SELECT tool_calls FROM messages
+                WHERE timestamp BETWEEN ? AND ?
+                AND tool_calls IS NOT NULL
+                """,
+                [start_ts, end_ts],
+            ).fetchall()
+            counts: dict[str, int] = {}
+            for row in rows:
+                try:
+                    for call in json.loads(row["tool_calls"]):
+                        name = call.get("function", {}).get("name") or call.get("name")
+                        if name:
+                            counts[name] = counts.get(name, 0) + 1
+                except Exception:
+                    pass
+            return counts
+
+        older = _tool_snapshot(now_ts - 30 * 86400, now_ts - 7 * 86400)
+        recent = _tool_snapshot(now_ts - 7 * 86400, now_ts)
+        current = _get_tool_usage(conn)
+
+        top_current = dict(sorted(current.items(), key=lambda x: -x[1])[:30])
+        max_count = max(top_current.values()) or 1
+
+        nodes = []
+        for name, cnt in top_current.items():
+            older_cnt = older.get(name, 0)
+            recent_cnt = recent.get(name, 0)
+
+            if older_cnt == 0 and cnt > 0:
+                trend = "new"
+            elif recent_cnt > older_cnt:
+                trend = "growing"
+            elif recent_cnt < older_cnt:
+                trend = "fading"
+            else:
+                trend = "stable"
+
+            nodes.append({
+                "id": name,
+                "count": cnt,
+                "brightness": round(cnt / max_count, 3),
+                "trend": trend,
+                "layers": {
+                    "30d": older_cnt,
+                    "7d": recent_cnt,
+                    "now": cnt,
+                },
+            })
+
+        # Edges: co-occurrence within current snapshot only
+        session_tools: dict[str, list[str]] = {}
+        rows = conn.execute(
+            """
+            SELECT session_id, tool_calls FROM messages
+            WHERE tool_calls IS NOT NULL
+            AND timestamp >= ?
+            """,
+            [now_ts - 7 * 86400],
+        ).fetchall()
+        for r in rows:
+            sid = str(r["session_id"])
+            if sid not in session_tools:
+                session_tools[sid] = []
+            try:
+                for call in json.loads(r["tool_calls"]):
+                    name = call.get("function", {}).get("name") or call.get("name")
+                    if name and name not in session_tools[sid]:
+                        session_tools[sid].append(name)
+            except Exception:
+                pass
+
+        co_occur: dict[tuple[str, str], int] = {}
+        for tools in session_tools.values():
+            for i, a in enumerate(tools):
+                for b in tools[i + 1 :]:
+                    if a in top_current and b in top_current:
+                        key = tuple(sorted([a, b]))
+                        co_occur[key] = co_occur.get(key, 0) + 1
+
+        edges = [
+            {"source": k[0], "target": k[1], "value": v}
+            for k, v in sorted(co_occur.items(), key=lambda x: -x[1])[:50]
+        ]
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "summary": {
+                "new_rooms": sum(1 for n in nodes if n["trend"] == "new"),
+                "growing": sum(1 for n in nodes if n["trend"] == "growing"),
+                "fading": sum(1 for n in nodes if n["trend"] == "fading"),
+                "stable": sum(1 for n in nodes if n["trend"] == "stable"),
+            },
+        }
+    finally:
+        conn.close()
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
@@ -284,6 +410,139 @@ async def get_sessions(
         }
     finally:
         conn.close()
+@router.get("/echo-map")
+async def get_echo_map() -> dict[str, Any]:
+    """Build directed tool call flow map (Echo Map) for visualization.
+
+    Shows tool chains within sessions as flowing rivers:
+    - Nodes: tools, sized by total call count
+    - Edges: directed transitions (A→B means A was followed by B in same session)
+    - Edge width: transition frequency
+    - Flow: river width = total outflow from each node
+
+    Returns three time slices (30d, 7d, now) for time-folded comparison.
+    """
+    conn = _get_db()
+    try:
+        now_ts = datetime.now().timestamp()
+
+        def _build_transitions(start_ts: float, end_ts: float) -> tuple[dict[str, int], dict[tuple[str, str], int]]:
+            """Return (node_counts, directed_transitions) for a time window."""
+            rows = conn.execute(
+                """
+                SELECT session_id, tool_calls, timestamp FROM messages
+                WHERE timestamp BETWEEN ? AND ?
+                AND tool_calls IS NOT NULL
+                ORDER BY session_id, timestamp
+                """,
+                [start_ts, end_ts],
+            ).fetchall()
+
+            # Group by session and sort by timestamp
+            session_messages: dict[str, list[tuple[float, list[str]]]] = {}
+            for r in rows:
+                sid = str(r["session_id"])
+                ts = r["timestamp"]
+                if sid not in session_messages:
+                    session_messages[sid] = []
+                try:
+                    calls = json.loads(r["tool_calls"])
+                    names = []
+                    for call in calls:
+                        name = call.get("function", {}).get("name") or call.get("name")
+                        if name:
+                            names.append(name)
+                    if names:
+                        session_messages[sid].append((ts, names))
+                except Exception:
+                    pass
+
+            # Build ordered tool sequence per session, then count directed transitions
+            transitions: dict[tuple[str, str], int] = {}
+            node_counts: dict[str, int] = {}
+            for sid, messages in session_messages.items():
+                messages.sort(key=lambda x: x[0])
+                all_tools: list[str] = []
+                for _, tools in messages:
+                    for t in tools:
+                        if not all_tools or all_tools[-1] != t:
+                            all_tools.append(t)
+
+                for t in all_tools:
+                    node_counts[t] = node_counts.get(t, 0) + 1
+
+                for i in range(len(all_tools) - 1):
+                    a, b = all_tools[i], all_tools[i + 1]
+                    if a != b:
+                        key = (a, b)
+                        transitions[key] = transitions.get(key, 0) + 1
+
+            return node_counts, transitions
+
+        older_counts, older_trans = _build_transitions(now_ts - 30 * 86400, now_ts - 7 * 86400)
+        recent_counts, recent_trans = _build_transitions(now_ts - 7 * 86400, now_ts)
+        current_counts, current_trans = _build_transitions(now_ts - 7 * 86400, now_ts)
+
+        # Use current as primary
+        top_tools = dict(sorted(current_counts.items(), key=lambda x: -x[1])[:30])
+        max_count = max(top_tools.values()) or 1
+
+        # Build directed edges from current transitions
+        edges_current = []
+        for (src, dst), cnt in current_trans.items():
+            if src in top_tools and dst in top_tools:
+                edges_current.append({
+                    "source": src,
+                    "target": dst,
+                    "value": cnt,
+                    "brightness": round(cnt / max(v for v in current_trans.values() or [1]), 3),
+                })
+
+        # Get trend for each node: compare recent vs older transition volume
+        node_trends = {}
+        for name in top_tools:
+            older_out = sum(v for (s, d), v in older_trans.items() if s == name)
+            recent_out = sum(v for (s, d), v in recent_trans.items() if s == name)
+            older_in = sum(v for (s, d), v in older_trans.items() if d == name)
+            recent_in = sum(v for (s, d), v in recent_trans.items() if d == name)
+
+            if older_out == 0 and recent_out > 0:
+                node_trends[name] = "new"
+            elif recent_out > older_out:
+                node_trends[name] = "growing"
+            elif recent_out < older_out:
+                node_trends[name] = "fading"
+            else:
+                node_trends[name] = "stable"
+
+        nodes = []
+        for name, cnt in top_tools.items():
+            nodes.append({
+                "id": name,
+                "count": cnt,
+                "brightness": round(cnt / max_count, 3),
+                "trend": node_trends.get(name, "stable"),
+                "layers": {
+                    "30d": older_counts.get(name, 0),
+                    "7d": recent_counts.get(name, 0),
+                    "now": cnt,
+                },
+            })
+
+        return {
+            "nodes": nodes,
+            "edges": sorted(edges_current, key=lambda x: -x["value"])[:80],
+            "summary": {
+                "new_rooms": sum(1 for n in nodes if n["trend"] == "new"),
+                "growing": sum(1 for n in nodes if n["trend"] == "growing"),
+                "fading": sum(1 for n in nodes if n["trend"] == "fading"),
+                "stable": sum(1 for n in nodes if n["trend"] == "stable"),
+            },
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/constellation")
 async def get_constellation() -> dict[str, Any]:
     """Build skill relationship constellation for visualization."""

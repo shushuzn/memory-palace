@@ -120,6 +120,278 @@
     );
   }
 
+  // ── Time-Folded Constellation ────────────────────────────────────────────
+
+  function TimeFoldedConstellation(_ref6) {
+    var nodes = _ref6.nodes, edges = _ref6.edges;
+    if (!nodes || nodes.length === 0) {
+      return React.createElement("div", { style: { padding: 32, textAlign: "center" } },
+        React.createElement("p", { className: "text-sm text-muted-foreground" }, "No data yet.")
+      );
+    }
+
+    var svgW = 600, svgH = 320;
+    var nodeMap = {};
+    var seed = 42;
+    var rng = createRng(seed);
+
+    // Place nodes in a circle (stable layout)
+    nodes.forEach(function (n, i) {
+      var angle = (i / nodes.length) * 2 * Math.PI;
+      var r = svgH / 2 - 50;
+      nodeMap[n.id] = {
+        x: svgW / 2 + r * Math.cos(angle) + (rng() - 0.5) * 40,
+        y: svgH / 2 + r * Math.sin(angle) + (rng() - 0.5) * 40,
+        vx: 0, vy: 0,
+      };
+    });
+
+    // Simple force step (80 iterations)
+    for (var step = 0; step < 80; step++) {
+      nodes.forEach(function (n) {
+        var p = nodeMap[n.id];
+        var fx = 0, fy = 0;
+        fx -= (p.x - svgW / 2) * 0.01;
+        fy -= (p.y - svgH / 2) * 0.01;
+        nodes.forEach(function (m) {
+          if (n.id === m.id) return;
+          var q = nodeMap[m.id];
+          var dx = p.x - q.x, dy = p.y - q.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          fx += dx / dist * 2;
+          fy += dy / dist * 2;
+        });
+        edges.forEach(function (e) {
+          var a = null;
+          if (e.source === n.id) a = nodeMap[e.target];
+          if (e.target === n.id) a = nodeMap[e.source];
+          if (!a) return;
+          var dx = a.x - p.x, dy = a.y - p.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          fx += dx / dist * 0.05 * (e.value || 1);
+          fy += dy / dist * 0.05 * (e.value || 1);
+        });
+        p.vx += fx; p.vy += fy;
+        p.vx *= 0.85; p.vy *= 0.85;
+        p.x += p.vx; p.y += p.vy;
+        p.x = Math.max(20, Math.min(svgW - 20, p.x));
+        p.y = Math.max(20, Math.min(svgH - 20, p.y));
+      });
+    }
+
+    var maxCount = Math.max.apply(Math, nodes.map(function (n) { return n.count; })) || 1;
+    var radius = function (n) { return 6 + Math.round((n.count / maxCount) * 18); };
+
+    var trendColor = function (trend) {
+      if (trend === "new") return "#4dd0e1";
+      if (trend === "growing") return "#4caf50";
+      if (trend === "fading") return "#ffa726";
+      return "#9e9e9e";
+    };
+
+    return React.createElement("div", null,
+      React.createElement("div", { style: { display: "flex", gap: 16, marginBottom: 12, fontSize: 11, color: "#888" } },
+        React.createElement("span", null, "Node size = total call count | Edge = co-occurrence in same session"),
+        React.createElement("span", { style: { marginLeft: "auto" } },
+          "30d: " + (nodes[0] ? nodes[0].layers["30d"] : 0) + " · 7d: " + (nodes[0] ? nodes[0].layers["7d"] : 0) + " · now: " + (nodes[0] ? nodes[0].layers["now"] : 0)
+        )
+      ),
+      React.createElement("svg", { width: "100%", viewBox: "0 0 " + svgW + " " + svgH, style: { maxHeight: 340 } },
+        // Edges
+        React.createElement("g", { opacity: 0.25 },
+          edges.map(function (e, i) {
+            var s = nodeMap[e.source], t = nodeMap[e.target];
+            if (!s || !t) return null;
+            return React.createElement("line", { key: i, x1: s.x, y1: s.y, x2: t.x, y2: t.y, stroke: "#4dd0e1", strokeWidth: Math.max(0.5, Math.min(3, e.value)) });
+          })
+        ),
+        // Nodes
+        nodes.map(function (n) {
+          var p = nodeMap[n.id];
+          var r = radius(n);
+          var color = trendColor(n.trend);
+          var isDashed = n.trend === "fading";
+          return React.createElement("g", { key: n.id, title: n.id + " (" + n.trend + ")" },
+            React.createElement("circle", {
+              cx: p.x, cy: p.y, r: r + 3,
+              fill: "none", stroke: color, strokeWidth: isDashed ? 1.5 : 0,
+              strokeDasharray: isDashed ? "4,3" : "none",
+              opacity: 0.5
+            }),
+            React.createElement("circle", {
+              cx: p.x, cy: p.y, r: r,
+              fill: color, opacity: n.brightness * 0.85 + 0.15,
+              style: n.trend === "new" ? { animation: "palace-pulse 2s infinite" } : {}
+            }),
+            React.createElement("title", null, n.id + " | " + n.trend + " | 30d:" + n.layers["30d"] + " 7d:" + n.layers["7d"] + " now:" + n.layers["now"]),
+            r > 10 && React.createElement("text", { x: p.x, y: p.y + 4, textAnchor: "middle", fontSize: 7, fill: "#0a0a0a", style: { pointerEvents: "none" } },
+              n.id.length > 10 ? n.id.slice(0, 8) + "…" : n.id
+            )
+          );
+        })
+      ),
+      React.createElement("style", null, "@keyframes palace-pulse { 0%,100%{opacity:0.85} 50%{opacity:0.3} }")
+    );
+  }
+
+  // ── Echo Map Flow ───────────────────────────────────────────────────────
+
+  function EchoMapFlow(_ref7) {
+    var nodes = _ref7.nodes, edges = _ref7.edges;
+    if (!nodes || nodes.length === 0) {
+      return React.createElement("div", { style: { padding: 32, textAlign: "center" } },
+        React.createElement("p", { className: "text-sm text-muted-foreground" }, "No data yet.")
+      );
+    }
+
+    var svgW = 600, svgH = 340;
+    var nodeMap = {};
+    var seed = 7;
+    var rng = createRng(seed);
+
+    // Place nodes using force simulation
+    nodes.forEach(function (n, i) {
+      var angle = (i / nodes.length) * 2 * Math.PI;
+      var r = svgH / 2 - 60;
+      nodeMap[n.id] = {
+        x: svgW / 2 + r * Math.cos(angle) + (rng() - 0.5) * 60,
+        y: svgH / 2 + r * Math.sin(angle) + (rng() - 0.5) * 60,
+        vx: 0, vy: 0,
+      };
+    });
+
+    // Force simulation
+    for (var step = 0; step < 100; step++) {
+      nodes.forEach(function (n) {
+        var p = nodeMap[n.id];
+        var fx = 0, fy = 0;
+        // Center gravity
+        fx -= (p.x - svgW / 2) * 0.008;
+        fy -= (p.y - svgH / 2) * 0.008;
+        // Repulsion between nodes
+        nodes.forEach(function (m) {
+          if (n.id === m.id) return;
+          var q = nodeMap[m.id];
+          var dx = p.x - q.x, dy = p.y - q.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          fx += dx / dist * 3;
+          fy += dy / dist * 3;
+        });
+        // Edge attraction (stronger for directed flow)
+        edges.forEach(function (e) {
+          var s = null, t = null;
+          if (e.source === n.id) { s = nodeMap[n.id]; t = nodeMap[e.target]; }
+          if (e.target === n.id) { s = nodeMap[n.id]; t = nodeMap[e.source]; }
+          if (!s || !t) return;
+          var dx = t.x - s.x, dy = t.y - s.y;
+          var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          // Attract toward target direction (flow along direction)
+          fx += dx / dist * 0.04 * (e.value || 1) * 0.1;
+          fy += dy / dist * 0.04 * (e.value || 1) * 0.1;
+        });
+        p.vx += fx; p.vy += fy;
+        p.vx *= 0.82; p.vy *= 0.82;
+        p.x += p.vx; p.y += p.vy;
+        p.x = Math.max(20, Math.min(svgW - 20, p.x));
+        p.y = Math.max(20, Math.min(svgH - 20, p.y));
+      });
+    }
+
+    var maxCount = Math.max.apply(Math, nodes.map(function (n) { return n.count; })) || 1;
+    var radius = function (n) { return 5 + Math.round((n.count / maxCount) * 20); };
+
+    var trendColor = function (trend) {
+      if (trend === "new") return "#4dd0e1";
+      if (trend === "growing") return "#4caf50";
+      if (trend === "fading") return "#ffa726";
+      return "#9e9e9e";
+    };
+
+    // Compute max edge value for width scaling
+    var maxEdge = Math.max.apply(Math, edges.map(function (e) { return e.value; })) || 1;
+
+    return React.createElement("div", null,
+      React.createElement("div", { style: { display: "flex", gap: 16, marginBottom: 10, fontSize: 11, color: "#888" } },
+        React.createElement("span", null, "\uD83C\uDF0A Echo Map: directed tool flow | river width = transition count"),
+        React.createElement("span", { style: { marginLeft: "auto" } },
+          "Top flow: " + (edges[0] ? edges[0].source + " \u2192 " + edges[0].target + " (" + edges[0].value + "x)" : "none")
+        )
+      ),
+      React.createElement("svg", { width: "100%", viewBox: "0 0 " + svgW + " " + svgH, style: { maxHeight: 380 } },
+        // Directed edges with arrow markers
+        React.createElement("defs", null,
+          edges.slice(0, 1).map(function (e, i) {
+            return React.createElement("marker", {
+              key: i,
+              id: "arrowhead",
+              markerWidth: 6, markerHeight: 6,
+              refX: 6, refY: 3, orient: "auto",
+            },
+              React.createElement("polygon", { points: "0 0, 6 3, 0 6", fill: "#4dd0e1", opacity: 0.5 })
+            );
+          })
+        ),
+        // Edges
+        React.createElement("g", { opacity: 0.35 },
+          edges.map(function (e, i) {
+            var s = nodeMap[e.source], t = nodeMap[e.target];
+            if (!s || !t) return null;
+            var dx = t.x - s.x, dy = t.y - s.y;
+            var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            var mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+            // Slight curve perpendicular to direction
+            var perpX = -dy / dist * 8 * Math.log1p(e.value) * 0.05;
+            var perpY = dx / dist * 8 * Math.log1p(e.value) * 0.05;
+            var cpx = mx + perpX, cpy = my + perpY;
+            var w = 0.5 + 3 * (e.value / maxEdge);
+            return React.createElement("g", { key: i },
+              React.createElement("path", {
+                d: "M " + s.x + "," + s.y + " Q " + cpx + "," + cpy + " " + t.x + "," + t.y,
+                fill: "none",
+                stroke: "#4dd0e1",
+                strokeWidth: w,
+                opacity: 0.4 + 0.5 * (e.value / maxEdge),
+                markerEnd: "url(#arrowhead)",
+              }),
+              e.value > 5 && React.createElement("text", {
+                x: cpx, y: cpy - 4,
+                textAnchor: "middle", fontSize: 7, fill: "#4dd0e1", opacity: 0.7,
+              }, e.value)
+            );
+          })
+        ),
+        // Nodes
+        nodes.map(function (n) {
+          var p = nodeMap[n.id];
+          var r = radius(n);
+          var color = trendColor(n.trend);
+          var isDashed = n.trend === "fading";
+          // Compute total outflow
+          var outflow = edges.filter(function (e) { return e.source === n.id; }).reduce(function (s, e) { return s + e.value; }, 0);
+          return React.createElement("g", { key: n.id, title: n.id + " \u2192 " + n.trend },
+            React.createElement("circle", {
+              cx: p.x, cy: p.y, r: r + 4,
+              fill: "none", stroke: color, strokeWidth: isDashed ? 1.5 : 0,
+              strokeDasharray: isDashed ? "4,3" : "none",
+              opacity: 0.35
+            }),
+            React.createElement("circle", {
+              cx: p.x, cy: p.y, r: r,
+              fill: color, opacity: n.brightness * 0.8 + 0.2,
+              style: n.trend === "new" ? { animation: "palace-pulse 2s infinite" } : {}
+            }),
+            React.createElement("title", null, n.id + " | outflow:" + outflow + " | " + n.trend),
+            r > 9 && React.createElement("text", {
+              x: p.x, y: p.y + 3,
+              textAnchor: "middle", fontSize: 6.5, fill: "#0a0a0a", style: { pointerEvents: "none" }
+            }, n.id.length > 9 ? n.id.slice(0, 7) + "\u2026" : n.id)
+          );
+        })
+      ),
+      React.createElement("style", null, "@keyframes palace-pulse { 0%,100%{opacity:0.85} 50%{opacity:0.3} }")
+    );
+  }
+
   // ── Timeline Chart ───────────────────────────────────────────────────────
 
   function TimelineChart(_ref3) {
@@ -348,7 +620,7 @@
   // ── Main Page ─────────────────────────────────────────────────────────────
 
   function MemoryPalace() {
-    var _useState = useState({ loading: true, stats: null, skills: null, timeline: null, constellation: null, error: null, activeTab: "overview" }),
+    var _useState = useState({ loading: true, stats: null, skills: null, timeline: null, constellation: null, palaceOverlay: null, echoMap: null, error: null, activeTab: "overview" }),
       data = _useState[0], setData = _useState[1];
 
     useEffect(function () {
@@ -357,13 +629,15 @@
         SDK.fetchJSON("/api/plugins/memory-palace/skills"),
         SDK.fetchJSON("/api/plugins/memory-palace/timeline"),
         SDK.fetchJSON("/api/plugins/memory-palace/constellation"),
+        SDK.fetchJSON("/api/plugins/memory-palace/palace-overlay"),
+        SDK.fetchJSON("/api/plugins/memory-palace/echo-map"),
       ])
         .then(function (_ref5) {
-          var stats = _ref5[0], skills = _ref5[1], timeline = _ref5[2], constellation = _ref5[3];
-          setData({ loading: false, stats: stats, skills: skills, timeline: timeline, constellation: constellation, activeTab: "overview", error: null });
+          var stats = _ref5[0], skills = _ref5[1], timeline = _ref5[2], constellation = _ref5[3], palaceOverlay = _ref5[4], echoMap = _ref5[5];
+          setData({ loading: false, stats: stats, skills: skills, timeline: timeline, constellation: constellation, palaceOverlay: palaceOverlay, echoMap: echoMap, activeTab: "overview", error: null });
         })
         .catch(function (err) {
-          setData({ loading: false, stats: null, skills: null, timeline: null, constellation: null, activeTab: "overview", error: String(err) || "Failed to load data" });
+          setData({ loading: false, stats: null, skills: null, timeline: null, constellation: null, palaceOverlay: null, echoMap: null, activeTab: "overview", error: String(err) || "Failed to load data" });
         });
     }, []);
 
@@ -391,12 +665,16 @@
     var skills = data.skills || {};
     var timeline = data.timeline || {};
     var constellation = data.constellation || {};
+    var palaceOverlay = data.palaceOverlay || {};
+    var echoMap = data.echoMap || {};
 
     var tabs = [
       { id: "overview", label: "Overview" },
       { id: "skills", label: "Skills" },
       { id: "timeline", label: "Timeline" },
       { id: "constellation", label: "Constellation" },
+      { id: "echo", label: "🌊 Echo" },
+      { id: "palace", label: "🏛️ Palace" },
     ];
 
     return React.createElement("div", { style: { padding: "0 0 32px" } },
@@ -521,6 +799,91 @@
             })
           )
         )
+      ),
+
+      // ── Palace Tab (Time-Folding Overlay) ─────────────────────────────
+      data.activeTab === "palace" && React.createElement("div", null,
+
+        // Summary row
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 } },
+          [
+            { label: "New Rooms", value: palaceOverlay.summary ? palaceOverlay.summary.new_rooms : 0, color: "#4dd0e1" },
+            { label: "Growing", value: palaceOverlay.summary ? palaceOverlay.summary.growing : 0, color: "#4caf50" },
+            { label: "Fading", value: palaceOverlay.summary ? palaceOverlay.summary.fading : 0, color: "#ffa726" },
+            { label: "Stable", value: palaceOverlay.summary ? palaceOverlay.summary.stable : 0, color: "#9e9e9e" },
+          ].map(function (s) {
+            return React.createElement(Card, { key: s.label },
+              React.createElement(CardContent, { style: { padding: 14, textAlign: "center" } },
+                React.createElement("div", { style: { fontSize: 28, fontWeight: 800, color: s.color } }, s.value),
+                React.createElement("div", { className: "text-xs text-muted-foreground" }, s.label)
+              )
+            );
+          })
+        ),
+
+        // Legend
+        React.createElement(Card, { style: { marginBottom: 16 } },
+          React.createElement(CardContent, { style: { padding: "12px 16px" } },
+            React.createElement("div", { style: { display: "flex", gap: 20, fontSize: 12, flexWrap: "wrap" } },
+              [
+                { label: "🆕 New rooms", color: "#4dd0e1", style: "pulse" },
+                { label: "📈 Growing", color: "#4caf50", style: "solid" },
+                { label: "📉 Fading", color: "#ffa726", style: "dashed" },
+                { label: "⚪ Stable", color: "#9e9e9e", style: "solid" },
+              ].map(function (l) {
+                return React.createElement("div", { key: l.label, style: { display: "flex", alignItems: "center", gap: 6 } },
+                  React.createElement("div", { style: { width: 10, height: 10, borderRadius: "50%", background: l.color } }),
+                  React.createElement("span", { style: { color: "#888" } }, l.label)
+                );
+              })
+            )
+          )
+        ),
+
+        // Time-folding constellation
+        palaceOverlay.nodes && palaceOverlay.nodes.length > 0 &&
+          React.createElement(Card, null,
+            React.createElement(CardHeader, null,
+              React.createElement(CardTitle, null, "⏱️ Time-Folded Constellation"),
+              React.createElement("p", { className: "text-xs text-muted-foreground", style: { marginTop: 2 } },
+                "Three agent timelines overlaid: brightness = current power"
+              )
+            ),
+            React.createElement(CardContent, null,
+              React.createElement(TimeFoldedConstellation, { nodes: palaceOverlay.nodes, edges: palaceOverlay.edges })
+            )
+          ),
+
+        !palaceOverlay.nodes &&
+          React.createElement(Card, null,
+            React.createElement(CardContent, { style: { padding: 32, textAlign: "center" } },
+              React.createElement("p", { className: "text-sm text-muted-foreground" }, "Not enough data to build palace overlay yet.")
+            )
+          )
+      ),
+
+      // ── Echo Tab (Tool Chain Flow) ────────────────────────────────────
+      data.activeTab === "echo" && React.createElement("div", null,
+
+        echoMap.nodes && echoMap.nodes.length > 0 &&
+          React.createElement(Card, null,
+            React.createElement(CardHeader, null,
+              React.createElement(CardTitle, null, "🌊 Echo Map — Tool Chain Flow"),
+              React.createElement("p", { className: "text-xs text-muted-foreground", style: { marginTop: 2 } },
+                "Directed rivers showing A\u2192B tool transitions within sessions — width = frequency"
+              )
+            ),
+            React.createElement(CardContent, null,
+              React.createElement(EchoMapFlow, { nodes: echoMap.nodes, edges: echoMap.edges })
+            )
+          ),
+
+        (!echoMap.nodes || echoMap.nodes.length === 0) &&
+          React.createElement(Card, null,
+            React.createElement(CardContent, { style: { padding: 32, textAlign: "center" } },
+              React.createElement("p", { className: "text-sm text-muted-foreground" }, "No echo data yet — keep using your agent!")
+            )
+          )
       ),
 
       // ── Skills Tab ──────────────────────────────────────────────────────
