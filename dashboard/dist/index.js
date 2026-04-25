@@ -237,7 +237,10 @@
   // ── Echo Map Flow ───────────────────────────────────────────────────────
 
   function EchoMapFlow(_ref7) {
-    var nodes = _ref7.nodes, edges = _ref7.edges;
+    var nodes = _ref7.nodes, edges = _ref7.edges, windows = _ref7.windows;
+    var _useState = useState("7d");
+    var activeWindow = _useState[0], setActiveWindow = _useState[1];
+
     if (!nodes || nodes.length === 0) {
       return React.createElement("div", { style: { padding: 32, textAlign: "center" } },
         React.createElement("p", { className: "text-sm text-muted-foreground" }, "No data yet.")
@@ -245,13 +248,19 @@
     }
 
     var svgW = 600, svgH = 340;
-    var nodeMap = {};
     var seed = 7;
     var rng = createRng(seed);
 
-    // Place nodes using force simulation
-    nodes.forEach(function (n, i) {
-      var angle = (i / nodes.length) * 2 * Math.PI;
+    // Use the ALL-NODES list (from top-level nodes) for stable layout across time slices
+    var layoutNodes = nodes; // top-level nodes always has all tools
+
+    // Pre-compute positions for all nodes using all edges (union for stability)
+    var allEdges = [];
+    if (windows) { allEdges = windows["7d"] ? windows["7d"].edges : edges; }
+
+    var nodeMap = {};
+    layoutNodes.forEach(function (n, i) {
+      var angle = (i / layoutNodes.length) * 2 * Math.PI;
       var r = svgH / 2 - 60;
       nodeMap[n.id] = {
         x: svgW / 2 + r * Math.cos(angle) + (rng() - 0.5) * 60,
@@ -260,16 +269,14 @@
       };
     });
 
-    // Force simulation
+    // Force simulation using union of all edges for stable positions
     for (var step = 0; step < 100; step++) {
-      nodes.forEach(function (n) {
+      layoutNodes.forEach(function (n) {
         var p = nodeMap[n.id];
         var fx = 0, fy = 0;
-        // Center gravity
         fx -= (p.x - svgW / 2) * 0.008;
         fy -= (p.y - svgH / 2) * 0.008;
-        // Repulsion between nodes
-        nodes.forEach(function (m) {
+        layoutNodes.forEach(function (m) {
           if (n.id === m.id) return;
           var q = nodeMap[m.id];
           var dx = p.x - q.x, dy = p.y - q.y;
@@ -277,15 +284,13 @@
           fx += dx / dist * 3;
           fy += dy / dist * 3;
         });
-        // Edge attraction (stronger for directed flow)
-        edges.forEach(function (e) {
+        allEdges.forEach(function (e) {
           var s = null, t = null;
           if (e.source === n.id) { s = nodeMap[n.id]; t = nodeMap[e.target]; }
           if (e.target === n.id) { s = nodeMap[n.id]; t = nodeMap[e.source]; }
           if (!s || !t) return;
           var dx = t.x - s.x, dy = t.y - s.y;
           var dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          // Attract toward target direction (flow along direction)
           fx += dx / dist * 0.04 * (e.value || 1) * 0.1;
           fy += dy / dist * 0.04 * (e.value || 1) * 0.1;
         });
@@ -297,7 +302,12 @@
       });
     }
 
-    var maxCount = Math.max.apply(Math, nodes.map(function (n) { return n.count; })) || 1;
+    // Active window data
+    var winData = (windows && windows[activeWindow]) || { nodes: nodes, edges: edges };
+    var displayNodes = winData.nodes || nodes;
+    var displayEdges = winData.edges || edges;
+
+    var maxCount = Math.max.apply(Math, displayNodes.map(function (n) { return n.count; })) || 1;
     var radius = function (n) { return 5 + Math.round((n.count / maxCount) * 20); };
 
     var trendColor = function (trend) {
@@ -307,39 +317,77 @@
       return "#9e9e9e";
     };
 
-    // Compute max edge value for width scaling
-    var maxEdge = Math.max.apply(Math, edges.map(function (e) { return e.value; })) || 1;
+    var maxEdge = Math.max.apply(Math, displayEdges.map(function (e) { return e.value; })) || 1;
+
+    // Window stats for button labels
+    var winStats = windows ? {
+      "30d": windows["30d"] ? windows["30d"].edges.length + " transitions" : "empty",
+      "7d": windows["7d"] ? windows["7d"].edges.length + " transitions" : "empty",
+      "now": windows["now"] ? windows["now"].edges.length + " transitions" : "empty",
+    } : null;
 
     return React.createElement("div", null,
-      React.createElement("div", { style: { display: "flex", gap: 16, marginBottom: 10, fontSize: 11, color: "#888" } },
-        React.createElement("span", null, "\uD83C\uDF0A Echo Map: directed tool flow | river width = transition count"),
-        React.createElement("span", { style: { marginLeft: "auto" } },
-          "Top flow: " + (edges[0] ? edges[0].source + " \u2192 " + edges[0].target + " (" + edges[0].value + "x)" : "none")
+      // Header row with time-slice buttons
+      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, flexWrap: "wrap" } },
+        React.createElement("span", { style: { color: "#4dd0e1", fontWeight: 600 } }, "\uD83C\uDF0A Echo Map"),
+        React.createElement("span", { style: { color: "#888" } }, "directed tool flow"),
+        React.createElement("span", { style: { marginLeft: "auto", color: "#666" } },
+          "Top: " + (displayEdges[0] ? displayEdges[0].source + " \u2192 " + displayEdges[0].target + " (" + displayEdges[0].value + "x)" : "none")
         )
       ),
-      React.createElement("svg", { width: "100%", viewBox: "0 0 " + svgW + " " + svgH, style: { maxHeight: 380 } },
-        // Directed edges with arrow markers
+      // Time slice buttons
+      React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } },
+        [
+          { key: "30d", label: "\u23F4 30 Days", sub: winStats ? winStats["30d"] : "" },
+          { key: "7d", label: "\u23F3 7 Days", sub: winStats ? winStats["7d"] : "" },
+          { key: "now", label: "\u26A1 Now", sub: winStats ? winStats["now"] : "" },
+        ].map(function (btn) {
+          var isActive = activeWindow === btn.key;
+          var hasData = winStats && winStats[btn.key] !== "empty";
+          return React.createElement("button", {
+            key: btn.key,
+            onClick: function () { return setActiveWindow(btn.key); },
+            style: {
+              padding: "4px 12px",
+              background: isActive ? "#4dd0e1" : (hasData ? "rgba(77,208,225,0.1)" : "rgba(255,255,255,0.04)"),
+              border: "1px solid " + (isActive ? "#4dd0e1" : "rgba(77,208,225,0.3)"),
+              borderRadius: 6,
+              color: isActive ? "#0a1628" : (hasData ? "#4dd0e1" : "#555"),
+              cursor: hasData ? "pointer" : "not-allowed",
+              fontSize: 11,
+              fontWeight: isActive ? 700 : 500,
+              transition: "all 0.15s",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 1,
+              opacity: hasData ? 1 : 0.4,
+            }
+          },
+            React.createElement("span", { style: { lineHeight: 1.2 } }, btn.label),
+            React.createElement("span", { style: { fontSize: 9, opacity: 0.7 } }, btn.sub)
+          );
+        })
+      ),
+      // Graph
+      React.createElement("svg", { width: "100%", viewBox: "0 0 " + svgW + " " + svgH, style: { maxHeight: 340 } },
         React.createElement("defs", null,
-          edges.slice(0, 1).map(function (e, i) {
-            return React.createElement("marker", {
-              key: i,
-              id: "arrowhead",
-              markerWidth: 6, markerHeight: 6,
-              refX: 6, refY: 3, orient: "auto",
-            },
-              React.createElement("polygon", { points: "0 0, 6 3, 0 6", fill: "#4dd0e1", opacity: 0.5 })
-            );
-          })
+          React.createElement("marker", {
+            id: "arrowhead",
+            markerWidth: 6, markerHeight: 6,
+            refX: 6, refY: 3, orient: "auto",
+          },
+            React.createElement("polygon", { points: "0 0, 6 3, 0 6", fill: "#4dd0e1", opacity: 0.6 })
+          )
         ),
         // Edges
         React.createElement("g", { opacity: 0.35 },
-          edges.map(function (e, i) {
+          displayEdges.map(function (e, i) {
             var s = nodeMap[e.source], t = nodeMap[e.target];
             if (!s || !t) return null;
             var dx = t.x - s.x, dy = t.y - s.y;
             var dist = Math.sqrt(dx * dx + dy * dy) || 1;
             var mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
-            // Slight curve perpendicular to direction
             var perpX = -dy / dist * 8 * Math.log1p(e.value) * 0.05;
             var perpY = dx / dist * 8 * Math.log1p(e.value) * 0.05;
             var cpx = mx + perpX, cpy = my + perpY;
@@ -350,7 +398,7 @@
                 fill: "none",
                 stroke: "#4dd0e1",
                 strokeWidth: w,
-                opacity: 0.4 + 0.5 * (e.value / maxEdge),
+                opacity: 0.3 + 0.5 * (e.value / maxEdge),
                 markerEnd: "url(#arrowhead)",
               }),
               e.value > 5 && React.createElement("text", {
@@ -361,13 +409,13 @@
           })
         ),
         // Nodes
-        nodes.map(function (n) {
+        displayNodes.map(function (n) {
           var p = nodeMap[n.id];
+          if (!p) return null;
           var r = radius(n);
           var color = trendColor(n.trend);
           var isDashed = n.trend === "fading";
-          // Compute total outflow
-          var outflow = edges.filter(function (e) { return e.source === n.id; }).reduce(function (s, e) { return s + e.value; }, 0);
+          var outflow = displayEdges.filter(function (e) { return e.source === n.id; }).reduce(function (s, e) { return s + e.value; }, 0);
           return React.createElement("g", { key: n.id, title: n.id + " \u2192 " + n.trend },
             React.createElement("circle", {
               cx: p.x, cy: p.y, r: r + 4,
@@ -874,7 +922,7 @@
               )
             ),
             React.createElement(CardContent, null,
-              React.createElement(EchoMapFlow, { nodes: echoMap.nodes, edges: echoMap.edges })
+              React.createElement(EchoMapFlow, { nodes: echoMap.nodes, edges: echoMap.edges, windows: echoMap.windows })
             )
           ),
 
